@@ -1,0 +1,14 @@
+{
+  "name": "influencer-affiliate-platform",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "cd client && npm run build",
+    "dev:client": "cd client && npm run dev",
+    "dev:server": "cd server && npm run dev",
+    "start": "cd server && npm start",
+    "install:all": "cd client && npm install && cd ../server && npm install",
+    "test:smoke": "cd client && npm run test:smoke"
+  }
+}
+

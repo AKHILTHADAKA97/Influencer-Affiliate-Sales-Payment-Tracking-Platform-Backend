@@ -33,12 +33,35 @@ router.post("/create-order", async (req, res) => {
       notes: { referralCode, influencerId: influencer._id.toString(), productId }
     });
 
+    const commissionPercent = Number(process.env.COMMISSION_PERCENT || 10);
+    const commission = (numericAmount * commissionPercent) / 100;
+
+    const payment = await Payment.create({
+      influencerId: influencer._id,
+      brandId: influencer.brandId,
+      totalAmount: numericAmount,
+      commission,
+      status: "initiated",
+      orderId: order.id,
+      initiatedAt: new Date(),
+      gatewayMeta: {
+        channel: "razorpay_checkout",
+        receipt,
+        productId,
+        referralCode
+      }
+    });
+
+    emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
+
     return res.json({
       orderId: order.id,
       amount: order.amount,
       currency: order.currency || "INR",
       referralCode,
-      influencerId: influencer._id.toString()
+      influencerId: influencer._id.toString(),
+      paymentId: payment._id.toString(),
+      status: payment.status
     });
   } catch (err) {
     return res.status(500).json({ message: err.message || "Unable to create order" });
@@ -52,6 +75,7 @@ router.post("/verify-payment", async (req, res) => {
       amount,
       productId = "product_demo",
       orderId,
+      paymentId,
       razorpay_payment_id,
       razorpay_signature
     } = req.body;
@@ -63,6 +87,14 @@ router.post("/verify-payment", async (req, res) => {
     const influencer = await Influencer.findOne({ referralCode });
     if (!influencer) return res.status(404).json({ message: "Invalid referral code" });
 
+    const payment =
+      (paymentId && (await Payment.findById(paymentId))) ||
+      (await Payment.findOne({ orderId, influencerId: influencer._id }).sort({ createdAt: -1 }));
+
+    if (!payment) {
+      return res.status(404).json({ message: "Payment session not found. Please retry checkout." });
+    }
+
     const valid = verifyPaymentSignature({
       orderId,
       paymentId: razorpay_payment_id,
@@ -70,7 +102,16 @@ router.post("/verify-payment", async (req, res) => {
     });
 
     if (!valid) {
-      return res.status(400).json({ message: "Payment signature verification failed" });
+      payment.status = "failed";
+      payment.failureReason = "Payment signature verification failed";
+      payment.failedAt = new Date();
+      payment.gatewayMeta = {
+        ...(payment.gatewayMeta || {}),
+        verification: "failed"
+      };
+      await payment.save();
+      emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
+      return res.status(400).json({ message: "Payment signature verification failed", payment });
     }
 
     const numericAmount = Number(amount);
@@ -84,17 +125,19 @@ router.post("/verify-payment", async (req, res) => {
       orderId: `RPY-${orderRef}`
     });
 
-    const commissionPercent = Number(process.env.COMMISSION_PERCENT || 10);
-    const commission = (numericAmount * commissionPercent) / 100;
-    const payment = await Payment.create({
-      influencerId: influencer._id,
-      brandId: influencer.brandId,
-      totalAmount: numericAmount,
-      commission,
-      status: "pending"
-    });
+    payment.status = "pending";
+    payment.razorpayPaymentId = razorpay_payment_id;
+    payment.razorpaySignature = razorpay_signature;
+    payment.paymentCapturedAt = new Date();
+    payment.failureReason = undefined;
+    payment.failedAt = undefined;
+    payment.gatewayMeta = {
+      ...(payment.gatewayMeta || {}),
+      verification: "success"
+    };
+    await payment.save();
 
-    emitEvent("sale.created", { saleId: sale._id.toString(), amount: numericAmount, commission });
+    emitEvent("sale.created", { saleId: sale._id.toString(), amount: numericAmount, commission: payment.commission });
     emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
 
     return res.json({ ok: true, sale, payment });
@@ -122,10 +165,48 @@ router.patch("/approve/:id", authRequired, allowRoles("admin", "finance"), async
   try {
     const context = await resolveTenantContext(req);
     const brandId = requireBrand(context.brandId);
-    const payment = await Payment.findOneAndUpdate({ _id: req.params.id, brandId }, { status: "approved" }, { new: true });
+    const payment = await Payment.findOne({ _id: req.params.id, brandId });
     if (!payment) return res.status(404).json({ message: "Payment not found in your tenant" });
+
+    if (payment.status === "paid") {
+      return res.status(400).json({ message: "Payment is already paid" });
+    }
+
+    if (payment.status === "failed" || payment.status === "cancelled") {
+      return res.status(400).json({ message: `Cannot process payment in '${payment.status}' state` });
+    }
+
+    // "Make Paid" from UI should directly process via payout to avoid extra manual step confusion
+    payment.status = "processing";
+    payment.processingAt = new Date();
+    await payment.save();
     emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
-    res.json(payment);
+
+    try {
+      const payout = await createPayout({ amount: payment.commission, referenceId: payment._id.toString() });
+      payment.status = "paid";
+      payment.approvedAt = payment.approvedAt || new Date();
+      payment.payoutDate = new Date();
+      payment.paidAt = new Date();
+      payment.razorpayPayoutId = payout.id;
+      payment.failureReason = undefined;
+      payment.failedAt = undefined;
+      payment.gatewayMeta = {
+        ...(payment.gatewayMeta || {}),
+        payoutMode: payout?.mode,
+        payoutStatus: payout?.status
+      };
+      await payment.save();
+      emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
+      return res.json(payment);
+    } catch (payoutErr) {
+      payment.status = "failed";
+      payment.failureReason = payoutErr.message || "Payout failed";
+      payment.failedAt = new Date();
+      await payment.save();
+      emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
+      return res.status(500).json({ message: payment.failureReason, payment });
+    }
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || "Server error" });
   }
@@ -138,13 +219,36 @@ router.post("/process/:id", authRequired, allowRoles("admin", "finance"), async 
     const payment = await Payment.findOne({ _id: req.params.id, brandId });
     if (!payment) return res.status(404).json({ message: "Payment not found" });
     if (payment.status !== "approved") return res.status(400).json({ message: "Payment must be approved first" });
-    const payout = await createPayout({ amount: payment.commission, referenceId: payment._id.toString() });
-    payment.status = "paid";
-    payment.payoutDate = new Date();
-    payment.razorpayPayoutId = payout.id;
+
+    payment.status = "processing";
+    payment.processingAt = new Date();
     await payment.save();
     emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
-    return res.json(payment);
+
+    try {
+      const payout = await createPayout({ amount: payment.commission, referenceId: payment._id.toString() });
+      payment.status = "paid";
+      payment.payoutDate = new Date();
+      payment.paidAt = new Date();
+      payment.razorpayPayoutId = payout.id;
+      payment.failureReason = undefined;
+      payment.failedAt = undefined;
+      payment.gatewayMeta = {
+        ...(payment.gatewayMeta || {}),
+        payoutMode: payout?.mode,
+        payoutStatus: payout?.status
+      };
+      await payment.save();
+      emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
+      return res.json(payment);
+    } catch (payoutErr) {
+      payment.status = "failed";
+      payment.failureReason = payoutErr.message || "Payout failed";
+      payment.failedAt = new Date();
+      await payment.save();
+      emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
+      return res.status(500).json({ message: payment.failureReason, payment });
+    }
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || "Server error" });
   }
@@ -219,16 +323,50 @@ router.post("/webhook/razorpay", async (req, res) => {
     if (!valid) return res.status(401).json({ message: "Invalid webhook signature" });
 
     const event = req.body?.event;
-    const payoutId = req.body?.payload?.payout?.entity?.id;
+    const payload = req.body?.payload || {};
+    const payoutId = payload?.payout?.entity?.id;
+    const orderId = payload?.order?.entity?.id;
+    const paymentId = payload?.payment?.entity?.id;
+
     if (event === "payout.processed" && payoutId) {
       const payment = await Payment.findOne({ razorpayPayoutId: payoutId });
       if (payment) {
         payment.status = "paid";
         payment.payoutDate = new Date();
+        payment.paidAt = new Date();
+        payment.gatewayMeta = { ...(payment.gatewayMeta || {}), lastWebhookEvent: event };
         await payment.save();
         emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
       }
     }
+
+    if (event === "payout.failed" && payoutId) {
+      const payment = await Payment.findOne({ razorpayPayoutId: payoutId });
+      if (payment) {
+        payment.status = "failed";
+        payment.failureReason = payload?.payout?.entity?.status_details?.description || "Payout failed";
+        payment.failedAt = new Date();
+        payment.gatewayMeta = { ...(payment.gatewayMeta || {}), lastWebhookEvent: event };
+        await payment.save();
+        emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
+      }
+    }
+
+    if (event === "payment.failed" && (orderId || paymentId)) {
+      const payment = await Payment.findOne({
+        $or: [{ orderId }, { razorpayPaymentId: paymentId }]
+      }).sort({ createdAt: -1 });
+
+      if (payment) {
+        payment.status = "failed";
+        payment.failureReason = payload?.payment?.entity?.error_description || "Payment failed";
+        payment.failedAt = new Date();
+        payment.gatewayMeta = { ...(payment.gatewayMeta || {}), lastWebhookEvent: event };
+        await payment.save();
+        emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
+      }
+    }
+
     return res.json({ ok: true });
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || "Server error" });

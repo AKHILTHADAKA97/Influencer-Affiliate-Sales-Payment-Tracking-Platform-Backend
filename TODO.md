@@ -1,14 +1,13 @@
-# Fix Implementation Plan
+# TODO - Influencer Affiliate Platform Upgrade
 
-## Issue 1: New users see empty dashboards after signup
-- [x] Extract per-brand demo data seeding from `bootstrapService.js`
-- [x] Call seeding in `authRoutes.js` after successful signup
+## In Progress
+- [ ] Extend payment lifecycle model for production-grade status tracking
+- [ ] Upgrade Razorpay payment routes for robust transitions (initiated -> pending/approved/processing/paid/failed/cancelled)
+- [ ] Add payment status summary analytics endpoint
+- [ ] Upgrade checkout UI for clear payment processing and failure visibility
+- [ ] Upgrade admin dashboard payment monitoring and controls
+- [ ] Run full project verification (build/test/run)
 
-## Issue 2: Razorpay checkout not opening
-- [x] Add `createOrder()`, `verifyPaymentSignature()`, `getRazorpayKeyId()` to `paymentService.js`
-- [x] Add `GET /key`, `POST /create-order`, `POST /verify-payment` to `paymentRoutes.js`
-- [x] Add public `GET /profile-by-code/:referralCode` to `influencerRoutes.js`
-- [x] Create `client/src/pages/CheckoutPage.jsx` with Razorpay checkout integration
-- [x] Add `/checkout/:referralCode` route to `App.jsx`
-- [x] Update influencer shareable link in `InfluencerDashboard.jsx`
-
+## Notes
+- User asked to ensure payment process is fully trackable and project runs correctly.
+- Focus on clear pending/success/failure handling with Razorpay details persisted.

@@ -1,13 +1,107 @@
 import express from "express";
 import { authRequired, allowRoles } from "../middleware/auth.js";
 import { Payment } from "../models/Payment.js";
-import { createPayout } from "../services/paymentService.js";
+import { Sale } from "../models/Sale.js";
+import { Influencer } from "../models/Influencer.js";
+import { createPayout, createOrder, verifyPaymentSignature, getRazorpayKeyId } from "../services/paymentService.js";
 import { emitEvent } from "../sockets/index.js";
 import PDFDocument from "pdfkit";
 import crypto from "crypto";
 import { resolveTenantContext, requireBrand } from "../utils/tenant.js";
 
 const router = express.Router();
+
+router.get("/key", (_req, res) => {
+  return res.json({ keyId: getRazorpayKeyId() });
+});
+
+router.post("/create-order", async (req, res) => {
+  try {
+    const { referralCode, amount, productId = "product_demo" } = req.body;
+    const numericAmount = Number(amount);
+    if (!referralCode || !numericAmount || numericAmount <= 0) {
+      return res.status(400).json({ message: "referralCode and valid amount are required" });
+    }
+
+    const influencer = await Influencer.findOne({ referralCode });
+    if (!influencer) return res.status(404).json({ message: "Invalid referral code" });
+
+    const receipt = `rcpt_${Date.now()}`;
+    const order = await createOrder({
+      amount: numericAmount,
+      receipt,
+      notes: { referralCode, influencerId: influencer._id.toString(), productId }
+    });
+
+    return res.json({
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency || "INR",
+      referralCode,
+      influencerId: influencer._id.toString()
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message || "Unable to create order" });
+  }
+});
+
+router.post("/verify-payment", async (req, res) => {
+  try {
+    const {
+      referralCode,
+      amount,
+      productId = "product_demo",
+      orderId,
+      razorpay_payment_id,
+      razorpay_signature
+    } = req.body;
+
+    if (!referralCode || !amount || !orderId || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ message: "Missing payment verification fields" });
+    }
+
+    const influencer = await Influencer.findOne({ referralCode });
+    if (!influencer) return res.status(404).json({ message: "Invalid referral code" });
+
+    const valid = verifyPaymentSignature({
+      orderId,
+      paymentId: razorpay_payment_id,
+      signature: razorpay_signature
+    });
+
+    if (!valid) {
+      return res.status(400).json({ message: "Payment signature verification failed" });
+    }
+
+    const numericAmount = Number(amount);
+    const orderRef = String(orderId || "").replace(/[^a-zA-Z0-9_-]/g, "");
+    const sale = await Sale.create({
+      influencerId: influencer._id,
+      brandId: influencer.brandId,
+      referralCode,
+      amount: numericAmount,
+      productId,
+      orderId: `RPY-${orderRef}`
+    });
+
+    const commissionPercent = Number(process.env.COMMISSION_PERCENT || 10);
+    const commission = (numericAmount * commissionPercent) / 100;
+    const payment = await Payment.create({
+      influencerId: influencer._id,
+      brandId: influencer.brandId,
+      totalAmount: numericAmount,
+      commission,
+      status: "pending"
+    });
+
+    emitEvent("sale.created", { saleId: sale._id.toString(), amount: numericAmount, commission });
+    emitEvent("payment.updated", { id: payment._id.toString(), status: payment.status });
+
+    return res.json({ ok: true, sale, payment });
+  } catch (err) {
+    return res.status(500).json({ message: err.message || "Payment verification failed" });
+  }
+});
 
 router.get("/history", authRequired, async (req, res) => {
   try {

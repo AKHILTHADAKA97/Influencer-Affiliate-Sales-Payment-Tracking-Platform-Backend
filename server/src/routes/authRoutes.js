@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { User } from "../models/User.js";
 import { Influencer } from "../models/Influencer.js";
+import { seedDemoDataForBrand } from "../services/bootstrapService.js";
 
 const router = express.Router();
 const validRoles = new Set(["admin", "influencer", "finance"]);
@@ -49,7 +50,14 @@ router.post("/signup", async (req, res) => {
       });
     }
 
-    return res.status(201).json({ id: user._id, role: user.role });
+    // Seed demo analytics data for this brand so new users see data immediately
+    try {
+      await seedDemoDataForBrand(computedBrandId);
+    } catch (e) {
+      console.log("Demo data seeding skipped:", e.message);
+    }
+
+    return res.status(201).json({ id: user._id, role: user.role, brandId: computedBrandId });
   } catch (error) {
     return res.status(500).json({ message: "Signup failed", error: error.message });
   }

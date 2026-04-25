@@ -66,7 +66,7 @@ export function InfluencerDashboard({ session }) {
       <div className="card">
         <h3>Your Referral Code</h3>
         <p>{profile?.referralCode || "No profile yet"}</p>
-        {profile?.referralCode ? <p>Affiliate Link: {`https://yourapp.com/product?ref=${profile.referralCode}`}</p> : null}
+        {profile?.referralCode ? <p>Affiliate Link: {`${window.location.origin}/checkout/${profile.referralCode}`}</p> : null}
       </div>
       <div className="card">
         <h3>Performance</h3>

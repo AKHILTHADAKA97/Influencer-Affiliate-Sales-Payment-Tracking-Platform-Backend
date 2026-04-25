@@ -196,3 +196,89 @@ export async function seedDemoAnalyticsData() {
 
   console.log("Seeded demo analytics data (clicks, sales, payments).");
 }
+
+export async function seedDemoDataForBrand(brandId, daysBack = 14) {
+  if (!brandId) return;
+
+  let influencers = await Influencer.find({ brandId }).limit(5);
+  if (influencers.length === 0) {
+    const dummyUser = await User.findOne({ brandId });
+    if (!dummyUser) return;
+
+    const displayName = dummyUser.email.split("@")[0];
+    let referralCode = referralForEmail(dummyUser.email);
+    while (await Influencer.findOne({ referralCode })) {
+      referralCode = referralForEmail(dummyUser.email);
+    }
+    const influencer = await Influencer.create({
+      userId: dummyUser._id,
+      brandId,
+      displayName,
+      referralCode
+    });
+    influencers = [influencer];
+  }
+
+  const existingClicks = await Click.countDocuments({ brandId });
+  const existingSales = await Sale.countDocuments({ brandId });
+  if (existingClicks > 20 && existingSales > 5) {
+    return;
+  }
+
+  const commissionPercent = Number(process.env.COMMISSION_PERCENT || 10);
+  const now = new Date();
+
+  for (let d = daysBack; d >= 0; d -= 1) {
+    const date = new Date(now);
+    date.setDate(date.getDate() - d);
+    const dayOfWeek = date.getDay();
+    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+
+    for (const influencer of influencers) {
+      const weekendMultiplier = isWeekend ? 1.5 : 1.0;
+      const baseClicks = Math.floor(Math.random() * 10 + 3);
+      const clickCount = Math.floor(baseClicks * weekendMultiplier);
+
+      for (let c = 0; c < clickCount; c += 1) {
+        const clickDate = new Date(date);
+        clickDate.setHours(Math.floor(Math.random() * 24), Math.floor(Math.random() * 60), Math.floor(Math.random() * 60));
+        await Click.create({
+          influencerId: influencer._id,
+          brandId: influencer.brandId,
+          referralCode: influencer.referralCode,
+          ipAddress: `192.168.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`,
+          userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          createdAt: clickDate
+        });
+      }
+
+      const conversionRate = 0.1;
+      const saleCount = Math.floor(clickCount * conversionRate);
+      for (let s = 0; s < saleCount; s += 1) {
+        const saleDate = new Date(date);
+        saleDate.setHours(Math.floor(Math.random() * 24), Math.floor(Math.random() * 60), Math.floor(Math.random() * 60));
+        const amount = Math.floor(Math.random() * 800 + 200);
+        const orderId = `ORD-${influencer.brandId}-${Date.now()}-${s}-${d}`;
+        const sale = await Sale.create({
+          influencerId: influencer._id,
+          brandId: influencer.brandId,
+          referralCode: influencer.referralCode,
+          amount,
+          orderId,
+          createdAt: saleDate
+        });
+        const commission = (amount * commissionPercent) / 100;
+        await Payment.create({
+          influencerId: influencer._id,
+          brandId: influencer.brandId,
+          totalAmount: amount,
+          commission,
+          status: Math.random() > 0.5 ? "pending" : (Math.random() > 0.5 ? "approved" : "paid"),
+          createdAt: saleDate
+        });
+      }
+    }
+  }
+  console.log(`Seeded demo data for brand: ${brandId}`);
+}
+

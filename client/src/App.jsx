@@ -5,6 +5,7 @@ import { LoginPage } from "./pages/LoginPage.jsx";
 import { AdminDashboard } from "./pages/AdminDashboard.jsx";
 import { FinanceDashboard } from "./pages/FinanceDashboard.jsx";
 import { InfluencerDashboard } from "./pages/InfluencerDashboard.jsx";
+import { CheckoutPage } from "./pages/CheckoutPage.jsx";
 
 export default function App() {
   const [session, setSession] = useState(() => {
@@ -31,7 +32,14 @@ export default function App() {
     setAuthToken("");
   };
 
-  if (!session) return <LoginPage onLogin={onLogin} />;
+  if (!session) {
+    return (
+      <Routes>
+        <Route path="/checkout/:referralCode" element={<CheckoutPage />} />
+        <Route path="*" element={<LoginPage onLogin={onLogin} />} />
+      </Routes>
+    );
+  }
 
   const getDashboard = () => {
     if (session.role === "admin") return <AdminDashboard session={session} />;
@@ -50,6 +58,7 @@ export default function App() {
       </nav>
       <Routes>
         <Route path="/" element={getDashboard()} />
+        <Route path="/checkout/:referralCode" element={<CheckoutPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </div>

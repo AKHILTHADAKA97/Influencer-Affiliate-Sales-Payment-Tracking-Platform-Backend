@@ -17,6 +17,21 @@ router.post("/create", authRequired, allowRoles("admin"), async (req, res) => {
   }
 });
 
+router.get("/profile-by-code/:referralCode", async (req, res) => {
+  try {
+    const influencer = await Influencer.findOne({ referralCode: req.params.referralCode });
+    if (!influencer) return res.status(404).json({ message: "Influencer not found" });
+    return res.json({
+      _id: influencer._id,
+      displayName: influencer.displayName,
+      referralCode: influencer.referralCode,
+      brandId: influencer.brandId
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message || "Server error" });
+  }
+});
+
 router.get("/list", authRequired, allowRoles("admin", "finance"), async (req, res) => {
   try {
     const context = await resolveTenantContext(req);

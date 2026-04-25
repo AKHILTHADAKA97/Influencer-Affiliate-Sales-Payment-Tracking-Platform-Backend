@@ -8,6 +8,7 @@
     "dev:server": "cd server && npm run dev",
     "start": "cd server && npm start",
     "install:all": "cd client && npm install && cd ../server && npm install",
+    "postinstall": "cd server && npm install",
     "test:smoke": "cd client && npm run test:smoke"
   }
 }
